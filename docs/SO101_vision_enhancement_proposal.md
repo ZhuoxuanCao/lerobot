@@ -129,10 +129,10 @@ $$
 
 #### 原理概述
 
-在原有的任务损失（L1 loss）基础上，添加一个**正则化项**来引导模型的注意力分布：
+在原有的任务损失（L1 loss）和变分正则（KLD loss）基础上，添加一个**注意力正则项**来引导模型的注意力分布：
 
 $$
-\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{L1}} + \lambda \cdot \mathcal{L}_{\text{attention}}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{L1}} + \text{kl\_weight} \cdot \mathcal{L}_{\text{KLD}} + \lambda \cdot \mathcal{L}_{\text{attention}}
 $$
 
 **参数说明**：
@@ -151,6 +151,19 @@ $$
 
   - 这是模型学习任务本身的核心损失，**必须保持**
 
+- **变分正则损失** $\mathcal{L}_{\text{KLD}}$：当启用 VAE（默认开启）时，引导潜变量分布接近标准正态，以提升可采样性与泛化
+
+  - 计算方式：
+
+    $$
+    \mathcal{L}_{\text{KLD}} = \mathbb{E}_{z \sim q(z|x)}\left[\log \frac{q(z|x)}{p(z)}\right]
+    = \frac{1}{B}\sum_{b=1}^{B} \frac{1}{2}\sum_{d=1}^{D} \left(\mu_{bd}^2 + \exp(\log \sigma_{bd}^2) - 1 - \log \sigma_{bd}^2\right)
+    $$
+
+  - 其中 $q(z|x) = \mathcal{N}(\mu, \sigma^2)$ 为编码器输出的后验，$p(z)=\mathcal{N}(0, I)$ 为先验；$B$ 为 batch 大小，$D$ 为潜变量维度
+  - 当 `use_vae=false` 时，该项整体设为 0
+  - **权重项**：`kl_weight`（默认 10.0）决定该正则在总损失中的相对强度
+
 - **权重系数** $\lambda$：平衡任务学习和注意力正则化的超参数
 
   - 推荐值：$\lambda = 0.01$
@@ -164,7 +177,7 @@ $$
 
 #### 注意力损失的组成
 
-注意力损失由**两个互补的子目标**组成，共同引导模型形成理想的注意力模式：
+注意力损失由**两个互补的子目标**组成（限制非视觉注意力的占比 + 提高视觉注意力的熵/覆盖度），共同引导模型形成理想的注意力模式：
 
 $$
 \mathcal{L}_{\text{attention}} = \mathcal{L}_{\text{ratio}} + \alpha \cdot \mathcal{L}_{\text{entropy}}
@@ -182,6 +195,8 @@ $$
 \mathcal{L}_{\text{ratio}} = \text{ReLU}\left(\frac{\sum_{i,j \in \text{state}} w_{ij}}{\sum_{i,j} w_{ij}} - \tau\right)
 $$
 
+
+
 **符号详解**：
 
 | 符号 | 含义 | 维度/取值 |
@@ -191,13 +206,12 @@ $$
 | $j$ | encoder token 索引 | $j = 1, 2, ..., S$ (sequence length) |
 | $\sum_{\text{state}} w_{ij}$ | **状态 tokens 的总注意力** | 累加 $j \in \{0, 1\}$ 的权重 |
 | $\sum_{\text{all}} w_{ij}$ | **所有 tokens 的总注意力** | 归一化基准 |
-| $\tau$ (tau) | **目标阈值**（超参数） | 推荐值 $\tau = 0.3$ (30%) |
+| $\tau$ (tau) | **目标阈值**（超参数） | 推荐值 $\tau = 0.5$ (50%) |
 | $\text{ReLU}(\cdot)$ | 修正线性单元 | $\max(0, \cdot)$，只惩罚违规情况 |
 
 **工作机制**：
 
 **步骤1：计算状态注意力占比**
-
 $$
 r_{\text{state}} = \frac{\sum_{i,j \in \text{state}} w_{ij}}{\sum_{i,j} w_{ij}}
 $$
@@ -212,11 +226,10 @@ $$
 \text{违规量} = r_{\text{state}} - \tau
 $$
 
-- 如果 $r_{\text{state}} = 0.25 < 0.3$，则违规量 = -0.05，**符合期望，无惩罚**
-- 如果 $r_{\text{state}} = 0.5 > 0.3$，则违规量 = +0.2，**超出阈值，产生惩罚**
+- 如果 $r_{\text{state}} = 0.25 < 0.5$，则违规量 = -0.25，**符合期望，无惩罚**
+- 如果 $r_{\text{state}} = 0.55 > 0.5$，则违规量 = +0.05，**超出阈值，产生惩罚**
 
 **步骤3：应用 ReLU 惩罚**
-
 $$
 \mathcal{L}_{\text{ratio}} = \max(0, r_{\text{state}} - 0.3)
 $$
@@ -246,8 +259,9 @@ else:
 
 #### 子目标2: 熵最大化损失（Entropy Maximization Loss）
 
-**数学表达式**：
+鼓励“看得更广”, 防止注意力/策略过于尖锐，促进探索与稳健性。
 
+**数学表达式**：
 $$
 \mathcal{L}_{\text{entropy}} = -\frac{1}{C} \sum_{i=1}^{C} H(w_i^{\text{vision}})
 $$
