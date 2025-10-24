@@ -33,7 +33,11 @@ def cfg_to_group(cfg: TrainPipelineConfig, return_list: bool = False) -> list[st
         f"seed:{cfg.seed}",
     ]
     if cfg.dataset is not None:
-        lst.append(f"dataset:{cfg.dataset.repo_id}")
+        # Truncate dataset tag to fit wandb's 64 character limit
+        dataset_tag = f"dataset:{cfg.dataset.repo_id}"
+        if len(dataset_tag) > 64:
+            dataset_tag = dataset_tag[:61] + "..."
+        lst.append(dataset_tag)
     if cfg.env is not None:
         lst.append(f"env:{cfg.env.type}")
     return lst if return_list else "-".join(lst)
@@ -110,7 +114,10 @@ class WandBLogger:
 
         step_id = checkpoint_dir.name
         artifact_name = f"{self._group}-{step_id}"
+        # Remove invalid characters for wandb artifacts (commas, etc.)
         artifact_name = get_safe_wandb_artifact_name(artifact_name)
+        # Also replace commas with underscores for multi-dataset names
+        artifact_name = artifact_name.replace(",", "_")
         artifact = self._wandb.Artifact(artifact_name, type="model")
         artifact.add_file(checkpoint_dir / PRETRAINED_MODEL_DIR / SAFETENSORS_SINGLE_FILE)
         self._wandb.log_artifact(artifact)
